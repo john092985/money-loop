@@ -6,87 +6,187 @@ private enum AppConfig {
     static let legacyLocalBackendURL = "http://10.0.28.212:5173"
 }
 
+private enum AppPalette {
+    static let page = Color(red: 0.94, green: 0.96, blue: 0.95)
+}
+
 struct ContentView: View {
     @AppStorage("serverURL") private var serverURL = AppConfig.defaultBackendURL
     @StateObject private var store = MoneyLoopStore()
     @State private var draftServerURL = ""
-    @State private var isShowingSettings = false
     @State private var linkDestination: LinkDestination?
 
     var body: some View {
+        TabView {
+            overviewScreen
+                .tabItem {
+                    Label("Overview", systemImage: "chart.pie.fill")
+                }
+
+            transactionsScreen
+                .tabItem {
+                    Label("Transactions", systemImage: "list.bullet.rectangle")
+                }
+
+            settingsScreen
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape.fill")
+                }
+        }
+        .tint(.teal)
+        .task {
+            migrateLegacyBackendURLIfNeeded()
+            await store.load(baseURL: serverURL)
+        }
+        .onOpenURL { url in
+            handleCallback(url)
+        }
+        .sheet(item: $linkDestination) { destination in
+            SafariView(url: destination.url)
+                .ignoresSafeArea()
+        }
+    }
+
+    private var overviewScreen: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 14) {
-                    balancePanel
-                    miniStats
+                VStack(spacing: 16) {
+                    heroPanel
+                    statStrip
                     insightPanel
                     weekPanel
                     categoriesPanel
-                    transactionsPanel
                 }
                 .padding(16)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(AppPalette.page)
             .navigationTitle("Money Loop")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         Task { await store.load(baseURL: serverURL) }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .disabled(store.isLoading)
                     .accessibilityLabel("Reload")
                 }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        draftServerURL = serverURL
-                        isShowingSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel("Settings")
-                }
-            }
-            .task {
-                migrateLegacyBackendURLIfNeeded()
-                await store.load(baseURL: serverURL)
-            }
-            .onOpenURL { url in
-                handleCallback(url)
-            }
-            .sheet(item: $linkDestination) { destination in
-                SafariView(url: destination.url)
-                    .ignoresSafeArea()
-            }
-            .sheet(isPresented: $isShowingSettings) {
-                settingsSheet
             }
         }
     }
 
-    private var balancePanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Last 30 days")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.white.opacity(0.74))
+    private var transactionsScreen: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    transactionSummaryCard
+                    transactionsPanel
+                }
+                .padding(16)
+            }
+            .background(AppPalette.page)
+            .navigationTitle("Transactions")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await store.sync(baseURL: serverURL) }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(store.isLoading || !store.dashboard.connected)
+                    .accessibilityLabel("Sync")
+                }
+            }
+        }
+    }
+
+    private var settingsScreen: some View {
+        NavigationStack {
+            Form {
+                Section("Connection") {
+                    LabeledContent("Bank") {
+                        Text(store.dashboard.connected ? "Connected" : "Not connected")
+                            .foregroundStyle(store.dashboard.connected ? .teal : .secondary)
+                    }
+
+                    Button {
+                        openPlaidLink()
+                    } label: {
+                        Label(store.dashboard.connected ? "Reconnect Bank" : "Connect Bank", systemImage: "link")
+                    }
+
+                    Button {
+                        Task { await store.sync(baseURL: serverURL) }
+                    } label: {
+                        Label("Sync Transactions", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(store.isLoading || !store.dashboard.connected)
+                }
+
+                Section("Backend") {
+                    TextField(AppConfig.defaultBackendURL, text: $draftServerURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Button("Use Cloud Backend") {
+                        draftServerURL = AppConfig.defaultBackendURL
+                    }
+
+                    Button("Save Backend") {
+                        serverURL = normalizedBackendURL(draftServerURL)
+                        Task { await store.load(baseURL: serverURL) }
+                    }
+                }
+
+                Section("Status") {
+                    Text(store.status)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.large)
+            .onAppear {
+                draftServerURL = serverURL
+            }
+        }
+    }
+
+    private var heroPanel: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Last 30 days")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.white.opacity(0.74))
+                    Text("\(store.dashboard.summary.transactionCount) transactions")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+                }
+
                 Spacer()
-                Text("\(store.dashboard.summary.transactionCount) txns")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.white.opacity(0.74))
+
+                StatusPill(connected: store.dashboard.connected)
             }
 
-            Text(store.dashboard.summary.totalExpense, format: .currency(code: "USD"))
-                .font(.system(size: 46, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-                .minimumScaleFactor(0.62)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Spending")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .textCase(.uppercase)
+                Text(store.dashboard.summary.totalExpense, format: .currency(code: "USD"))
+                    .font(.system(size: 50, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+                    .minimumScaleFactor(0.55)
+                    .lineLimit(1)
+            }
 
-            Text(store.status)
-                .font(.callout)
-                .foregroundStyle(.white.opacity(0.78))
+            Text(store.dashboard.insight.headline)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.76))
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
                 Button {
@@ -101,8 +201,8 @@ struct ContentView: View {
                 Button {
                     Task { await store.sync(baseURL: serverURL) }
                 } label: {
-                    Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-                        .frame(maxWidth: .infinity)
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .frame(width: 54, height: 44)
                 }
                 .buttonStyle(.bordered)
                 .tint(.white)
@@ -111,20 +211,34 @@ struct ContentView: View {
             .font(.headline)
             .controlSize(.large)
         }
-        .padding(20)
-        .background(Color(red: 0.06, green: 0.16, blue: 0.13))
+        .padding(22)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.05, green: 0.18, blue: 0.15),
+                    Color(red: 0.09, green: 0.33, blue: 0.28),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    private var miniStats: some View {
-        HStack(spacing: 10) {
-            StatTile(title: "Income", value: store.dashboard.summary.totalIncome, tint: .teal)
+    private var statStrip: some View {
+        HStack(spacing: 12) {
+            StatTile(
+                title: "Income",
+                value: store.dashboard.summary.totalIncome,
+                tint: .teal,
+                icon: "arrow.down.left.circle.fill"
+            )
             StatTile(
                 title: "Net",
                 value: store.dashboard.summary.totalIncome - store.dashboard.summary.totalExpense,
-                tint: .indigo
+                tint: .indigo,
+                icon: "equal.circle.fill"
             )
-            SmallTextTile(title: "AI", value: "Auto", tint: .blue)
         }
     }
 
@@ -232,7 +346,7 @@ struct ContentView: View {
 
     private var transactionsPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PanelHeader(title: "Transactions", subtitle: "Recent month only")
+            PanelHeader(title: "Recent Transactions", subtitle: "Clean merchant names")
 
             if store.dashboard.transactions.isEmpty {
                 EmptyStateText("No transactions loaded yet.")
@@ -247,43 +361,21 @@ struct ContentView: View {
         .panelStyle()
     }
 
-    private var settingsSheet: some View {
-        NavigationStack {
-            Form {
-                Section("Backend") {
-                    TextField(AppConfig.defaultBackendURL, text: $draftServerURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    Button("Use Cloud Backend") {
-                        draftServerURL = AppConfig.defaultBackendURL
-                    }
-                }
-
-                Section {
-                    Text("The cloud backend stores your encrypted Plaid connection in Supabase and keeps working when your Mac is offline.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { isShowingSettings = false }
-                }
-
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        serverURL = normalizedBackendURL(draftServerURL)
-                        isShowingSettings = false
-                        Task { await store.load(baseURL: serverURL) }
-                    }
-                }
-            }
+    private var transactionSummaryCard: some View {
+        HStack(spacing: 12) {
+            StatTile(
+                title: "Spent",
+                value: store.dashboard.summary.totalExpense,
+                tint: .red,
+                icon: "arrow.up.right.circle.fill"
+            )
+            StatTile(
+                title: "This Week",
+                value: store.dashboard.week.summary.totalExpense,
+                tint: .teal,
+                icon: "calendar.circle.fill"
+            )
         }
-        .presentationDetents([.medium])
     }
 
     private var maxCategoryValue: Double {
@@ -344,43 +436,43 @@ struct StatTile: View {
     let title: String
     let value: Double
     let tint: Color
+    let icon: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: icon)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(tint)
+
             Text(title)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(.secondary)
+
             Text(value, format: .currency(code: "USD"))
-                .font(.headline.weight(.heavy))
+                .font(.title3.weight(.heavy))
                 .foregroundStyle(tint)
                 .minimumScaleFactor(0.65)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(16)
         .background(.background)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .shadow(color: .black.opacity(0.04), radius: 14, y: 8)
     }
 }
 
-struct SmallTextTile: View {
-    let title: String
-    let value: String
-    let tint: Color
-
+struct StatusPill: View {
+    let connected: Bool
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title)
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.headline.weight(.heavy))
-                .foregroundStyle(tint)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.background)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        Label(connected ? "Live" : "Setup", systemImage: connected ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+            .font(.caption.weight(.heavy))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.white.opacity(0.16))
+            .clipShape(Capsule())
     }
 }
 
