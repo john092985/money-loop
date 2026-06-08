@@ -15,6 +15,9 @@ struct ContentView: View {
     @StateObject private var store = MoneyLoopStore()
     @State private var draftServerURL = ""
     @State private var linkDestination: LinkDestination?
+    @State private var questionText = ""
+    @State private var queryAnswer = "Ask something like: 我这个月外卖花了多少？"
+    @State private var isAsking = false
 
     var body: some View {
         TabView {
@@ -26,6 +29,11 @@ struct ContentView: View {
             transactionsScreen
                 .tabItem {
                     Label("Transactions", systemImage: "list.bullet.rectangle")
+                }
+
+            askScreen
+                .tabItem {
+                    Label("Ask", systemImage: "sparkles")
                 }
 
             settingsScreen
@@ -99,6 +107,23 @@ struct ContentView: View {
                     .accessibilityLabel("Sync")
                 }
             }
+        }
+    }
+
+    private var askScreen: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    reportCard(report: store.dashboard.reports.monthly, icon: "calendar")
+                    reportCard(report: store.dashboard.reports.weekly, icon: "calendar.badge.clock")
+                    askPanel
+                    suggestedQuestions
+                }
+                .padding(16)
+            }
+            .background(AppPalette.page)
+            .navigationTitle("Ask")
+            .navigationBarTitleDisplayMode(.large)
         }
     }
 
@@ -376,6 +401,112 @@ struct ContentView: View {
                 icon: "calendar.circle.fill"
             )
         }
+    }
+
+    private func reportCard(report: SpendingReport, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.teal)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(report.title)
+                        .font(.headline)
+                    Text(report.period)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(report.total, format: .currency(code: "USD"))
+                    .font(.headline.weight(.heavy))
+                    .foregroundStyle(.teal)
+            }
+
+            Text(report.text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .panelStyle()
+    }
+
+    private var askPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            PanelHeader(title: "Natural Language Query", subtitle: "Ask about your spending")
+
+            TextField("我这个月外卖花了多少？", text: $questionText, axis: .vertical)
+                .lineLimit(2...4)
+                .textFieldStyle(.roundedBorder)
+
+            Button {
+                Task { await submitQuestion() }
+            } label: {
+                Label(isAsking ? "Thinking..." : "Ask", systemImage: "paperplane.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.teal)
+            .disabled(isAsking || questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Text(queryAnswer)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .panelStyle()
+    }
+
+    private var suggestedQuestions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            PanelHeader(title: "Try Asking", subtitle: "Quick prompts")
+
+            ForEach([
+                "我这个月外卖花了多少？",
+                "最近有没有不正常的消费？",
+                "我能从哪里省钱？",
+            ], id: \.self) { prompt in
+                Button {
+                    questionText = prompt
+                    Task { await submitQuestion() }
+                } label: {
+                    HStack {
+                        Text(prompt)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(.background)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .disabled(isAsking)
+            }
+        }
+        .panelStyle()
+    }
+
+    private func submitQuestion() async {
+        let question = questionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+
+        isAsking = true
+        queryAnswer = "Thinking..."
+
+        do {
+            let response = try await MoneyLoopAPI(baseURL: serverURL).ask(question: question)
+            queryAnswer = response.answer
+        } catch {
+            queryAnswer = error.localizedDescription
+        }
+
+        isAsking = false
     }
 
     private var maxCategoryValue: Double {
@@ -718,6 +849,10 @@ struct MoneyLoopAPI {
         try await request(path: "/api/plaid/sync-transactions", method: "POST")
     }
 
+    func ask(question: String) async throws -> QueryResponse {
+        try await request(path: "/api/query", method: "POST", body: ["question": question])
+    }
+
     private func request<Response: Decodable, Body: Encodable>(
         path: String,
         method: String = "GET",
@@ -775,6 +910,7 @@ struct Dashboard: Decodable {
     let connected: Bool
     let summary: Summary
     let insight: SpendingInsight
+    let reports: SpendingReports
     let week: WeekSummary
     let transactions: [BankTransaction]
 
@@ -782,6 +918,7 @@ struct Dashboard: Decodable {
         case connected
         case summary
         case insight
+        case reports
         case week
         case transactions
     }
@@ -790,12 +927,14 @@ struct Dashboard: Decodable {
         connected: Bool,
         summary: Summary,
         insight: SpendingInsight,
+        reports: SpendingReports,
         week: WeekSummary,
         transactions: [BankTransaction]
     ) {
         self.connected = connected
         self.summary = summary
         self.insight = insight
+        self.reports = reports
         self.week = week
         self.transactions = transactions
     }
@@ -806,6 +945,7 @@ struct Dashboard: Decodable {
         connected = try container.decodeIfPresent(Bool.self, forKey: .connected) ?? false
         summary = try container.decodeIfPresent(Summary.self, forKey: .summary) ?? .empty
         insight = try container.decodeIfPresent(SpendingInsight.self, forKey: .insight) ?? .empty
+        reports = try container.decodeIfPresent(SpendingReports.self, forKey: .reports) ?? .empty
         week = try container.decodeIfPresent(WeekSummary.self, forKey: .week) ?? .empty
         transactions = try container.decodeIfPresent([BankTransaction].self, forKey: .transactions) ?? []
     }
@@ -814,6 +954,7 @@ struct Dashboard: Decodable {
         connected: false,
         summary: .empty,
         insight: .empty,
+        reports: .empty,
         week: .empty,
         transactions: []
     )
@@ -887,6 +1028,41 @@ struct SpendingInsight: Decodable {
         topCategoryName: nil,
         topMerchants: []
     )
+}
+
+struct SpendingReports: Decodable {
+    let monthly: SpendingReport
+    let weekly: SpendingReport
+
+    static let empty = SpendingReports(
+        monthly: .empty(title: "Monthly Summary"),
+        weekly: .empty(title: "Weekly Summary")
+    )
+}
+
+struct SpendingReport: Decodable {
+    let title: String
+    let period: String
+    let total: Double
+    let comparisonTotal: Double
+    let delta: Double
+    let text: String
+
+    static func empty(title: String) -> SpendingReport {
+        SpendingReport(
+            title: title,
+            period: "Not enough data",
+            total: 0,
+            comparisonTotal: 0,
+            delta: 0,
+            text: "Sync transactions to generate this report."
+        )
+    }
+}
+
+struct QueryResponse: Decodable {
+    let answer: String
+    let source: String?
 }
 
 struct TopMerchant: Decodable, Identifiable {

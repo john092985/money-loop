@@ -43,6 +43,8 @@ const keyPath = path.join(dataDir, "local-storage-key");
 const publicDir = path.resolve(__dirname, "../public");
 const distDir = path.resolve(__dirname, "../dist");
 const stateStorageKey = process.env.APP_USER_ID || "demo-user";
+const displayDays = 30;
+const historyDays = 120;
 const databaseUrl = process.env.DATABASE_URL || "";
 const dbPool = databaseUrl
   ? new pg.Pool({
@@ -69,6 +71,11 @@ const categoryRules = [
     category: "Dining",
     subcategory: "Fast Casual",
     patterns: ["sweetgreen", "chipotle", "mcdonald", "taco", "burger", "pizza"],
+  },
+  {
+    category: "Dining",
+    subcategory: "Food Delivery",
+    patterns: ["doordash", "door dash", "ubereats", "uber eats", "grubhub", "postmates", "delivery"],
   },
   { category: "Dining", subcategory: "Restaurant", patterns: ["restaurant", "cafe", "bar"] },
   { category: "Groceries", subcategory: "Grocery", patterns: ["market", "grocery", "whole foods", "supermarket", "trader joe"] },
@@ -191,7 +198,7 @@ async function loadDemoItem() {
       accessToken: await decryptText(rawState.accessToken),
       itemId: rawState.itemId || null,
       cursor: rawState.cursor || null,
-      transactions: filterTransactionsByDays(rawState.transactions || [], 30).sort((a, b) =>
+      transactions: filterTransactionsByDays(rawState.transactions || [], historyDays).sort((a, b) =>
         b.date.localeCompare(a.date)
       ),
     };
@@ -205,7 +212,7 @@ async function saveDemoItem() {
     accessToken: await encryptText(demoItem.accessToken),
     itemId: demoItem.itemId,
     cursor: demoItem.cursor,
-    transactions: filterTransactionsByDays(demoItem.transactions || [], 30),
+    transactions: filterTransactionsByDays(demoItem.transactions || [], historyDays),
     savedAt: new Date().toISOString(),
   });
 }
@@ -269,6 +276,34 @@ function daysAgoKey(days) {
   const date = new Date();
   date.setDate(date.getDate() - (days - 1));
   return dateKey(date);
+}
+
+function addMonths(date, months) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
+}
+
+function startOfMonth(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function endOfDay(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function dateFromKey(value) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function filterTransactionsByRange(transactions, start, end) {
+  const startKey = typeof start === "string" ? start : dateKey(start);
+  const endKey = typeof end === "string" ? end : dateKey(end);
+
+  return transactions.filter(
+    (transaction) => transaction.date >= startKey && transaction.date <= endKey
+  );
 }
 
 function filterTransactionsByDays(transactions, days) {
@@ -572,6 +607,179 @@ function topMerchants(transactions, limit = 3) {
     .slice(0, limit);
 }
 
+function topCategories(transactions, limit = 3) {
+  return buildSummary(transactions).categoryBreakdown.slice(0, limit);
+}
+
+function totalExpenses(transactions) {
+  return Number(
+    transactions
+      .filter((transaction) => transaction.direction === "expense" && !transaction.pending)
+      .reduce((sum, transaction) => sum + transaction.amount, 0)
+      .toFixed(2)
+  );
+}
+
+function takeoutTransactions(transactions) {
+  return transactions.filter((transaction) => {
+    const text = [
+      transaction.merchant,
+      transaction.rawMerchant,
+      transaction.category,
+      transaction.subcategory,
+      transaction.plaidDetailedCategory,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return (
+      transaction.direction === "expense" &&
+      transaction.category === "Dining" &&
+      (text.includes("delivery") ||
+        text.includes("takeout") ||
+        text.includes("doordash") ||
+        text.includes("uber eats") ||
+        text.includes("ubereats") ||
+        text.includes("grubhub") ||
+        text.includes("postmates"))
+    );
+  });
+}
+
+function categoryDeltaDrivers(currentTransactions, previousTransactions, limit = 2) {
+  const current = buildSummary(currentTransactions).categoryBreakdown;
+  const previous = new Map(
+    buildSummary(previousTransactions).categoryBreakdown.map((category) => [
+      category.name,
+      category.value,
+    ])
+  );
+
+  return current
+    .map((category) => ({
+      name: category.name,
+      value: category.value,
+      delta: Number((category.value - (previous.get(category.name) || 0)).toFixed(2)),
+    }))
+    .filter((category) => category.delta > 0)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, limit);
+}
+
+function monthAverage(transactions, startMonth, monthCount, filterFn) {
+  const totals = [];
+
+  for (let index = 0; index < monthCount; index += 1) {
+    const start = addMonths(startMonth, -index);
+    const end = new Date(start.getFullYear(), start.getMonth() + 1, 0);
+    const monthTransactions = filterTransactionsByRange(transactions, start, end);
+    totals.push(totalExpenses(filterFn ? monthTransactions.filter(filterFn) : monthTransactions));
+  }
+
+  if (totals.length === 0) return 0;
+
+  return Number((totals.reduce((sum, value) => sum + value, 0) / totals.length).toFixed(2));
+}
+
+function buildSpendingReports(transactions) {
+  const today = endOfDay();
+  const currentMonthStart = startOfMonth(today);
+  const previousMonthStart = addMonths(currentMonthStart, -1);
+  const previousMonthSameDay = new Date(
+    previousMonthStart.getFullYear(),
+    previousMonthStart.getMonth(),
+    Math.min(today.getDate(), new Date(previousMonthStart.getFullYear(), previousMonthStart.getMonth() + 1, 0).getDate())
+  );
+  const currentWeekStart = dateFromKey(daysAgoKey(7));
+  const previousWeekStart = dateFromKey(daysAgoKey(14));
+  const previousWeekEnd = new Date(currentWeekStart);
+  previousWeekEnd.setDate(previousWeekEnd.getDate() - 1);
+
+  const currentMonth = filterTransactionsByRange(transactions, currentMonthStart, today);
+  const previousMonthSamePeriod = filterTransactionsByRange(
+    transactions,
+    previousMonthStart,
+    previousMonthSameDay
+  );
+  const currentWeek = filterTransactionsByRange(transactions, currentWeekStart, today);
+  const previousWeek = filterTransactionsByRange(
+    transactions,
+    previousWeekStart,
+    previousWeekEnd
+  );
+
+  const monthSpent = totalExpenses(currentMonth);
+  const previousMonthSpent = totalExpenses(previousMonthSamePeriod);
+  const monthDelta = Number((monthSpent - previousMonthSpent).toFixed(2));
+  const weekSpent = totalExpenses(currentWeek);
+  const previousWeekSpent = totalExpenses(previousWeek);
+  const weekDelta = Number((weekSpent - previousWeekSpent).toFixed(2));
+  const drivers = categoryDeltaDrivers(currentMonth, previousMonthSamePeriod);
+  const takeoutSpent = totalExpenses(takeoutTransactions(currentMonth));
+  const threeMonthTakeoutAverage = monthAverage(
+    transactions,
+    addMonths(currentMonthStart, -1),
+    3,
+    (transaction) => takeoutTransactions([transaction]).length > 0
+  );
+  const takeoutDeltaPercent =
+    threeMonthTakeoutAverage > 0
+      ? Math.round(((takeoutSpent - threeMonthTakeoutAverage) / threeMonthTakeoutAverage) * 100)
+      : null;
+  const driverText = drivers.length
+    ? `增长主要来自 ${drivers.map((driver) => driver.name).join(" 和 ")}。`
+    : monthDelta > 0
+      ? "增长分布在多个类别。"
+      : "整体没有明显增长类别。";
+  const takeoutText =
+    takeoutSpent > 0 && takeoutDeltaPercent !== null
+      ? `你在外卖上花了 ${moneyText(takeoutSpent)}，${
+          takeoutDeltaPercent >= 0 ? "已经超过" : "低于"
+        }过去三个月平均水平 ${Math.abs(takeoutDeltaPercent)}%。`
+      : takeoutSpent > 0
+        ? `你在外卖上花了 ${moneyText(takeoutSpent)}。`
+        : "这个月目前没有明显外卖支出。";
+
+  return {
+    monthly: {
+      title: "Monthly Summary",
+      period: `${dateKey(currentMonthStart)} to ${dateKey(today)}`,
+      total: monthSpent,
+      comparisonTotal: previousMonthSpent,
+      delta: monthDelta,
+      text:
+        monthSpent > 0
+          ? `你本月目前花了 ${moneyText(monthSpent)}，比上月同期${
+              monthDelta >= 0 ? "高" : "低"
+            } ${moneyText(Math.abs(monthDelta))}。${driverText}${takeoutText}`
+          : "同步交易后会自动生成本月消费总结。",
+      drivers,
+      takeout: {
+        total: takeoutSpent,
+        threeMonthAverage: threeMonthTakeoutAverage,
+        deltaPercent: takeoutDeltaPercent,
+      },
+    },
+    weekly: {
+      title: "Weekly Summary",
+      period: `${dateKey(currentWeekStart)} to ${dateKey(today)}`,
+      total: weekSpent,
+      comparisonTotal: previousWeekSpent,
+      delta: weekDelta,
+      text:
+        weekSpent > 0
+          ? `最近 7 天花了 ${moneyText(weekSpent)}，比前 7 天${
+              weekDelta >= 0 ? "高" : "低"
+            } ${moneyText(Math.abs(weekDelta))}。主要支出集中在 ${
+              topCategories(currentWeek, 2).map((category) => category.name).join(" 和 ") || "少数交易"
+            }。`
+          : "最近 7 天没有已入账消费。",
+      drivers: categoryDeltaDrivers(currentWeek, previousWeek),
+    },
+  };
+}
+
 function buildSpendingInsight(monthTransactions, weekTransactions) {
   const monthSummary = buildSummary(monthTransactions);
   const weekSummary = buildSummary(weekTransactions);
@@ -628,21 +836,173 @@ function withTransactionDefaults(transaction) {
 }
 
 function buildDashboardPayload(transactions) {
-  const monthTransactions = filterTransactionsByDays(
+  const historyTransactions = filterTransactionsByDays(
     transactions.map(withTransactionDefaults),
-    30
+    historyDays
   );
+  const monthTransactions = filterTransactionsByDays(historyTransactions, displayDays);
   const weekTransactions = filterTransactionsByDays(monthTransactions, 7);
 
   return {
     transactions: monthTransactions,
     summary: buildSummary(monthTransactions),
     insight: buildSpendingInsight(monthTransactions, weekTransactions),
+    reports: buildSpendingReports(historyTransactions),
     week: {
       transactions: weekTransactions,
       summary: buildSummary(weekTransactions),
       dailySpending: buildDailySpending(weekTransactions, 7),
     },
+  };
+}
+
+function detectAnomalies(transactions, limit = 5) {
+  const expenses = transactions
+    .filter((transaction) => transaction.direction === "expense" && !transaction.pending)
+    .sort((a, b) => b.amount - a.amount);
+
+  if (expenses.length === 0) return [];
+
+  const average = expenses.reduce((sum, transaction) => sum + transaction.amount, 0) / expenses.length;
+  const variance =
+    expenses.reduce((sum, transaction) => sum + (transaction.amount - average) ** 2, 0) /
+    expenses.length;
+  const stddev = Math.sqrt(variance);
+  const threshold = Math.max(average + stddev * 1.7, 100);
+
+  return expenses
+    .filter((transaction) => transaction.amount >= threshold)
+    .slice(0, limit)
+    .map((transaction) => ({
+      merchant: transaction.merchant,
+      date: transaction.date,
+      amount: transaction.amount,
+      category: transaction.category,
+      reason: `${moneyText(transaction.amount)} is above your recent typical transaction size.`,
+    }));
+}
+
+function savingsOpportunities(transactions, limit = 4) {
+  const discretionaryCategories = new Set([
+    "Dining",
+    "Shopping",
+    "Entertainment",
+    "Subscription",
+    "Travel",
+    "Transport",
+  ]);
+
+  return buildSummary(
+    transactions.filter((transaction) => discretionaryCategories.has(transaction.category))
+  )
+    .categoryBreakdown.slice(0, limit)
+    .map((category) => ({
+      category: category.name,
+      amount: category.value,
+      suggestion: `Review recurring or low-value ${category.name.toLowerCase()} spending first.`,
+    }));
+}
+
+function buildQueryContext() {
+  const historyTransactions = filterTransactionsByDays(
+    demoItem.transactions.map(withTransactionDefaults),
+    historyDays
+  );
+  const currentMonth = filterTransactionsByRange(
+    historyTransactions,
+    startOfMonth(),
+    endOfDay()
+  );
+  const reports = buildSpendingReports(historyTransactions);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    reports,
+    currentMonthSummary: buildSummary(currentMonth),
+    takeoutThisMonth: totalExpenses(takeoutTransactions(currentMonth)),
+    anomalies: detectAnomalies(historyTransactions),
+    savings: savingsOpportunities(currentMonth),
+    transactions: historyTransactions.slice(0, 90).map((transaction) => ({
+      date: transaction.date,
+      merchant: transaction.merchant,
+      rawMerchant: transaction.rawMerchant,
+      amount: transaction.amount,
+      direction: transaction.direction,
+      category: transaction.category,
+      subcategory: transaction.subcategory,
+      location: transaction.location,
+      pending: transaction.pending,
+    })),
+  };
+}
+
+function fallbackQueryAnswer(question, context) {
+  const normalizedQuestion = String(question || "").toLowerCase();
+
+  if (normalizedQuestion.includes("外卖") || normalizedQuestion.includes("takeout") || normalizedQuestion.includes("delivery")) {
+    return `你这个月外卖花了 ${moneyText(context.takeoutThisMonth)}。`;
+  }
+
+  if (
+    normalizedQuestion.includes("不正常") ||
+    normalizedQuestion.includes("异常") ||
+    normalizedQuestion.includes("unusual") ||
+    normalizedQuestion.includes("abnormal")
+  ) {
+    if (context.anomalies.length === 0) {
+      return "最近没有发现明显不正常的大额消费。";
+    }
+
+    const top = context.anomalies[0];
+    return `最需要看一眼的是 ${top.date} 的 ${top.merchant}，金额 ${moneyText(top.amount)}，类别是 ${top.category}。`;
+  }
+
+  if (
+    normalizedQuestion.includes("省钱") ||
+    normalizedQuestion.includes("save") ||
+    normalizedQuestion.includes("哪里")
+  ) {
+    if (context.savings.length === 0) {
+      return "目前可分析的可选消费不多；同步更多交易后我会优先看餐饮、购物、订阅和交通。";
+    }
+
+    const top = context.savings[0];
+    return `优先从 ${top.category} 看起，本月这类支出约 ${moneyText(top.amount)}。`;
+  }
+
+  return context.reports.monthly.text;
+}
+
+async function answerSpendingQuestion(question) {
+  const context = buildQueryContext();
+
+  if (!openai) {
+    return {
+      answer: fallbackQueryAnswer(question, context),
+      context,
+      source: "rule",
+    };
+  }
+
+  const response = await openai.responses.create({
+    model: openaiModel,
+    instructions:
+      "You are a concise personal spending analyst. Answer in Chinese. Use only the provided transaction context. If the data is insufficient, say what is missing. Do not give investment, credit, tax, or legal advice.",
+    input: JSON.stringify({
+      question,
+      context,
+    }),
+  });
+
+  return {
+    answer: response.output_text?.trim() || fallbackQueryAnswer(question, context),
+    context: {
+      reports: context.reports,
+      anomalies: context.anomalies,
+      savings: context.savings,
+      takeoutThisMonth: context.takeoutThisMonth,
+    },
+    source: `llm:${openaiModel}`,
   };
 }
 
@@ -661,7 +1021,7 @@ app.post("/api/plaid/create-link-token", requirePlaidConfig, async (req, res) =>
       country_codes: [CountryCode.Us],
       language: "en",
       transactions: {
-        days_requested: 30,
+        days_requested: historyDays,
       },
       redirect_uri: process.env.PLAID_REDIRECT_URI || undefined,
     });
@@ -722,10 +1082,10 @@ app.post("/api/plaid/sync-transactions", requirePlaidConfig, async (req, res) =>
     const byId = new Map(demoItem.transactions.map((transaction) => [transaction.id, transaction]));
 
     const normalizedAdded = await classifyWithLLM(
-      filterTransactionsByDays(added.map(normalizeTransaction), 30)
+      filterTransactionsByDays(added.map(normalizeTransaction), historyDays)
     );
     const normalizedModified = await classifyWithLLM(
-      filterTransactionsByDays(modified.map(normalizeTransaction), 30)
+      filterTransactionsByDays(modified.map(normalizeTransaction), historyDays)
     );
 
     for (const transaction of normalizedAdded) {
@@ -742,7 +1102,7 @@ app.post("/api/plaid/sync-transactions", requirePlaidConfig, async (req, res) =>
 
     demoItem.cursor = cursor;
     demoItem.transactions = await classifyWithLLM(
-      filterTransactionsByDays(Array.from(byId.values()).map(withTransactionDefaults), 30)
+      filterTransactionsByDays(Array.from(byId.values()).map(withTransactionDefaults), historyDays)
     );
     demoItem.transactions = demoItem.transactions.sort((a, b) => b.date.localeCompare(a.date));
     await saveDemoItem();
@@ -770,6 +1130,29 @@ app.get("/api/dashboard", (req, res) => {
     item_id: demoItem.itemId,
     ...buildDashboardPayload(demoItem.transactions),
   });
+});
+
+app.get("/api/reports", (req, res) => {
+  const historyTransactions = filterTransactionsByDays(
+    demoItem.transactions.map(withTransactionDefaults),
+    historyDays
+  );
+  res.json(buildSpendingReports(historyTransactions));
+});
+
+app.post("/api/query", async (req, res) => {
+  try {
+    const question = String(req.body?.question || "").trim();
+
+    if (!question) {
+      res.status(400).json({ error: "Missing question." });
+      return;
+    }
+
+    res.json(await answerSpendingQuestion(question));
+  } catch (error) {
+    res.status(500).json({ error: error.response?.data || error.message });
+  }
 });
 
 app.post("/api/classify-with-llm", async (req, res) => {
