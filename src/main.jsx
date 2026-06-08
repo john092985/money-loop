@@ -114,12 +114,14 @@ function App() {
   const [transactions, setTransactions] = useState([]);
   const [summary, setSummary] = useState(null);
   const [week, setWeek] = useState(null);
+  const [insight, setInsight] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
 
   const applyDashboardData = (data) => {
     setTransactions(data.transactions || []);
     setSummary(data.summary || null);
     setWeek(data.week || null);
+    setInsight(data.insight || null);
   };
 
   const loadTransactions = useCallback(async () => {
@@ -151,6 +153,7 @@ function App() {
     setTransactions([]);
     setSummary(null);
     setWeek(null);
+    setInsight(null);
     setStatus("Disconnected locally.");
   };
 
@@ -201,6 +204,28 @@ function App() {
           value={money((summary?.totalIncome || 0) - (summary?.totalExpense || 0))}
         />
         <MiniStat label="AI sorted" value="Auto" tone="ai" />
+      </section>
+
+      <section className="panel insightPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Monthly Brief</h2>
+            <p>Auto cleaned and categorized</p>
+          </div>
+          <span>{insight?.topCategoryName || "Ready"}</span>
+        </div>
+        <strong>{insight?.headline || "Connect and sync to generate a spending summary."}</strong>
+        <p>{insight?.month || "No spending categories yet."}</p>
+        <p>{insight?.week || "Weekly comparison will appear after sync."}</p>
+        {insight?.topMerchants?.length ? (
+          <div className="merchantChips">
+            {insight.topMerchants.slice(0, 3).map((merchant) => (
+              <span key={merchant.name}>
+                {merchant.name} <b>{money(merchant.value)}</b>
+              </span>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="weekPanel">
@@ -269,7 +294,17 @@ function App() {
                 <strong>{transaction.merchant}</strong>
                 <span>
                   {shortDate(transaction.date)} · {transaction.category}
+                  {transaction.subcategory ? ` · ${transaction.subcategory}` : ""}
+                  {transaction.location ? ` · ${transaction.location}` : ""}
                 </span>
+                <small>
+                  {transaction.rawMerchant && transaction.rawMerchant !== transaction.merchant
+                    ? `Cleaned from ${transaction.rawMerchant}`
+                    : "Cleaned merchant"}
+                  {typeof transaction.confidence === "number"
+                    ? ` · ${Math.round(transaction.confidence * 100)}%`
+                    : ""}
+                </small>
               </div>
               <b className={transaction.direction === "income" ? "income" : ""}>
                 {transaction.direction === "income" ? "+" : "-"}

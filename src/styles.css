@@ -187,6 +187,46 @@ h2 {
   padding: 16px;
 }
 
+.insightPanel {
+  display: grid;
+  gap: 10px;
+}
+
+.insightPanel > strong {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.insightPanel > p {
+  color: #596861;
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.45;
+}
+
+.merchantChips {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.merchantChips span {
+  background: #f3f7f5;
+  border-radius: 8px;
+  color: #203a32;
+  font-size: 11px;
+  font-weight: 800;
+  min-width: 0;
+  overflow: hidden;
+  padding: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merchantChips b {
+  color: #6d7a73;
+}
+
 .sectionHeader {
   align-items: flex-start;
   display: flex;
@@ -329,7 +369,8 @@ h2 {
 }
 
 .transactionCopy strong,
-.transactionCopy span {
+.transactionCopy span,
+.transactionCopy small {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -346,6 +387,13 @@ h2 {
   font-size: 12px;
   font-weight: 650;
   margin-top: 4px;
+}
+
+.transactionCopy small {
+  color: #8a9690;
+  font-size: 11px;
+  font-weight: 650;
+  margin-top: 3px;
 }
 
 .transactionRow > b {

@@ -19,6 +19,7 @@ struct ContentView: View {
                 VStack(spacing: 14) {
                     balancePanel
                     miniStats
+                    insightPanel
                     weekPanel
                     categoriesPanel
                     transactionsPanel
@@ -125,6 +126,41 @@ struct ContentView: View {
             )
             SmallTextTile(title: "AI", value: "Auto", tint: .blue)
         }
+    }
+
+    private var insightPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            PanelHeader(title: "Monthly Brief", subtitle: "Auto cleaned and categorized")
+
+            Text(store.dashboard.insight.headline)
+                .font(.headline.weight(.heavy))
+                .foregroundStyle(.primary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                InsightLine(icon: "calendar", text: store.dashboard.insight.month)
+                InsightLine(icon: "chart.line.uptrend.xyaxis", text: store.dashboard.insight.week)
+            }
+
+            if !store.dashboard.insight.topMerchants.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(store.dashboard.insight.topMerchants.prefix(3)) { merchant in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(merchant.name)
+                                .font(.caption.weight(.bold))
+                                .lineLimit(1)
+                            Text(merchant.value, format: .currency(code: "USD"))
+                                .font(.caption2.weight(.heavy))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Color(.secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                }
+            }
+        }
+        .panelStyle()
     }
 
     private var weekPanel: some View {
@@ -433,6 +469,10 @@ struct TransactionRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Text(transaction.detailText)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer()
@@ -446,6 +486,25 @@ struct TransactionRow: View {
 
     private func shortDate(_ date: String) -> String {
         date.dropFirst(5).replacingOccurrences(of: "-", with: "/")
+    }
+}
+
+struct InsightLine: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.teal)
+                .frame(width: 16)
+
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -623,12 +682,46 @@ struct ServerError: Decodable {
 struct Dashboard: Decodable {
     let connected: Bool
     let summary: Summary
+    let insight: SpendingInsight
     let week: WeekSummary
     let transactions: [BankTransaction]
+
+    enum CodingKeys: String, CodingKey {
+        case connected
+        case summary
+        case insight
+        case week
+        case transactions
+    }
+
+    init(
+        connected: Bool,
+        summary: Summary,
+        insight: SpendingInsight,
+        week: WeekSummary,
+        transactions: [BankTransaction]
+    ) {
+        self.connected = connected
+        self.summary = summary
+        self.insight = insight
+        self.week = week
+        self.transactions = transactions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        connected = try container.decodeIfPresent(Bool.self, forKey: .connected) ?? false
+        summary = try container.decodeIfPresent(Summary.self, forKey: .summary) ?? .empty
+        insight = try container.decodeIfPresent(SpendingInsight.self, forKey: .insight) ?? .empty
+        week = try container.decodeIfPresent(WeekSummary.self, forKey: .week) ?? .empty
+        transactions = try container.decodeIfPresent([BankTransaction].self, forKey: .transactions) ?? []
+    }
 
     static let empty = Dashboard(
         connected: false,
         summary: .empty,
+        insight: .empty,
         week: .empty,
         transactions: []
     )
@@ -656,6 +749,61 @@ struct WeekSummary: Decodable {
     static let empty = WeekSummary(transactions: [], summary: .empty, dailySpending: [])
 }
 
+struct SpendingInsight: Decodable {
+    let headline: String
+    let month: String
+    let week: String
+    let topCategoryName: String?
+    let topMerchants: [TopMerchant]
+
+    enum CodingKeys: String, CodingKey {
+        case headline
+        case month
+        case week
+        case topCategoryName
+        case topMerchants
+    }
+
+    init(
+        headline: String,
+        month: String,
+        week: String,
+        topCategoryName: String?,
+        topMerchants: [TopMerchant]
+    ) {
+        self.headline = headline
+        self.month = month
+        self.week = week
+        self.topCategoryName = topCategoryName
+        self.topMerchants = topMerchants
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        headline = try container.decodeIfPresent(String.self, forKey: .headline) ?? Self.empty.headline
+        month = try container.decodeIfPresent(String.self, forKey: .month) ?? Self.empty.month
+        week = try container.decodeIfPresent(String.self, forKey: .week) ?? Self.empty.week
+        topCategoryName = try container.decodeIfPresent(String.self, forKey: .topCategoryName)
+        topMerchants = try container.decodeIfPresent([TopMerchant].self, forKey: .topMerchants) ?? []
+    }
+
+    static let empty = SpendingInsight(
+        headline: "Connect and sync to generate a spending summary.",
+        month: "No spending categories yet.",
+        week: "Weekly comparison will appear after sync.",
+        topCategoryName: nil,
+        topMerchants: []
+    )
+}
+
+struct TopMerchant: Decodable, Identifiable {
+    let name: String
+    let value: Double
+
+    var id: String { name }
+}
+
 struct DailySpending: Decodable, Identifiable {
     let date: String
     let label: String
@@ -674,11 +822,33 @@ struct CategoryBreakdown: Decodable, Identifiable {
 struct BankTransaction: Decodable, Identifiable {
     let id: String
     let date: String
+    let rawMerchant: String?
     let merchant: String
     let amount: Double
     let direction: String
     let category: String
+    let subcategory: String?
+    let location: String?
+    let confidence: Double?
     let pending: Bool
+
+    var detailText: String {
+        var parts = [String]()
+
+        if let subcategory, !subcategory.isEmpty {
+            parts.append(subcategory)
+        }
+
+        if let location, !location.isEmpty {
+            parts.append(location)
+        }
+
+        if let confidence {
+            parts.append("\(Int((confidence * 100).rounded()))% confident")
+        }
+
+        return parts.isEmpty ? rawMerchant ?? "Cleaned merchant" : parts.joined(separator: " · ")
+    }
 }
 
 struct LinkDestination: Identifiable {

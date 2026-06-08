@@ -64,13 +64,22 @@ const emptyDemoItem = {
 let demoItem = await loadDemoItem();
 
 const categoryRules = [
-  { category: "Dining", patterns: ["coffee", "restaurant", "cafe", "starbucks", "mcdonald"] },
-  { category: "Groceries", patterns: ["market", "grocery", "whole foods", "supermarket"] },
-  { category: "Transport", patterns: ["uber", "lyft", "metro", "transit", "parking"] },
-  { category: "Shopping", patterns: ["amazon", "target", "walmart", "store"] },
-  { category: "Travel", patterns: ["airline", "hotel", "booking", "airbnb"] },
-  { category: "Subscription", patterns: ["netflix", "spotify", "apple", "subscription"] },
-  { category: "Income", patterns: ["payroll", "direct deposit"] },
+  { category: "Dining", subcategory: "Coffee", patterns: ["coffee", "starbucks", "peet"] },
+  {
+    category: "Dining",
+    subcategory: "Fast Casual",
+    patterns: ["sweetgreen", "chipotle", "mcdonald", "taco", "burger", "pizza"],
+  },
+  { category: "Dining", subcategory: "Restaurant", patterns: ["restaurant", "cafe", "bar"] },
+  { category: "Groceries", subcategory: "Grocery", patterns: ["market", "grocery", "whole foods", "supermarket", "trader joe"] },
+  { category: "Transport", subcategory: "Rideshare", patterns: ["uber", "lyft"] },
+  { category: "Transport", subcategory: "Transit", patterns: ["metro", "transit", "bart", "clipper", "parking"] },
+  { category: "Shopping", subcategory: "Retail", patterns: ["amazon", "target", "walmart", "store", "shop"] },
+  { category: "Travel", subcategory: "Flights", patterns: ["airline", "united", "delta", "southwest"] },
+  { category: "Travel", subcategory: "Lodging", patterns: ["hotel", "booking", "airbnb"] },
+  { category: "Subscription", subcategory: "Software", patterns: ["openai", "apple", "google", "subscription"] },
+  { category: "Subscription", subcategory: "Media", patterns: ["netflix", "spotify", "hulu"] },
+  { category: "Income", subcategory: "Payroll", patterns: ["payroll", "direct deposit"] },
 ];
 
 const allowedCategories = [
@@ -107,6 +116,20 @@ const plaidCategoryMap = {
   TRANSFER_OUT: "Transfer",
   TRANSPORTATION: "Transport",
   TRAVEL: "Travel",
+};
+
+const plaidSubcategoryMap = {
+  FOOD_AND_DRINK_COFFEE: "Coffee",
+  FOOD_AND_DRINK_FAST_FOOD: "Fast Food",
+  FOOD_AND_DRINK_RESTAURANT: "Restaurant",
+  GENERAL_MERCHANDISE_ONLINE_MARKETPLACES: "Online Shopping",
+  GENERAL_MERCHANDISE_SUPERSTORES: "Retail",
+  RENT_AND_UTILITIES_RENT: "Rent",
+  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY: "Utilities",
+  TRANSFER_IN_DEPOSIT: "Deposit",
+  TRANSFER_OUT_ACCOUNT_TRANSFER: "Account Transfer",
+  TRANSPORTATION_TAXIS_AND_RIDE_SHARES: "Rideshare",
+  TRAVEL_FLIGHTS: "Flights",
 };
 
 async function readStorageSecret() {
@@ -292,9 +315,52 @@ function requirePlaidConfig(req, res, next) {
   next();
 }
 
+function titleCase(value) {
+  return value
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => {
+      if (word.length <= 3 && /^[a-z]+$/.test(word)) {
+        return word.toUpperCase();
+      }
+
+      return word[0].toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+}
+
+function cleanMerchantName(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Unknown Merchant";
+
+  const cleaned = raw
+    .replace(/^(TST|SQ|SP|POS|DEBIT|CARD|CHECKCARD|PURCHASE|AUTH)\*?\s*/i, "")
+    .replace(/\b(ID|REF|AUTH|CO|INC|LLC)\s*[:#-]?\s*[A-Z0-9-]{4,}\b/gi, "")
+    .replace(/[#*]\s*\d+\b/g, "")
+    .replace(/\b\d{4,}\b/g, "")
+    .replace(/\b(ONLINE|PURCHASE|PAYMENT|THANK YOU|THANK)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/[,\-.]+$/g, "")
+    .trim();
+
+  return titleCase(cleaned || raw);
+}
+
+function extractLocation(transaction, merchantText) {
+  const city = transaction.location?.city || transaction.location?.region || "";
+  if (city) return titleCase(city);
+
+  const match = String(merchantText || "").match(
+    /\b([A-Z][A-Z .'-]{2,})\s+(CA|NY|WA|TX|OR|FL|IL|MA|NJ|PA|DC)\b/
+  );
+
+  return match ? titleCase(match[1].trim()) : null;
+}
+
 function classifyTransaction(transaction) {
   if (transaction.amount < 0) {
-    return { category: "Income", source: "amount" };
+    return { category: "Income", subcategory: "Income", confidence: 0.98, source: "amount" };
   }
 
   const text = [
@@ -312,31 +378,49 @@ function classifyTransaction(transaction) {
   );
 
   if (match) {
-    return { category: match.category, source: "rule" };
+    return {
+      category: match.category,
+      subcategory: match.subcategory || null,
+      confidence: 0.86,
+      source: "rule",
+    };
   }
 
   const plaidPrimary = transaction.personal_finance_category?.primary;
+  const plaidDetailed = transaction.personal_finance_category?.detailed;
   const mappedPlaidCategory = plaidCategoryMap[plaidPrimary];
 
   if (mappedPlaidCategory) {
-    return { category: mappedPlaidCategory, source: "plaid" };
+    return {
+      category: mappedPlaidCategory,
+      subcategory: plaidSubcategoryMap[plaidDetailed] || null,
+      confidence: 0.78,
+      source: "plaid",
+    };
   }
 
-  return { category: "Other", source: "fallback" };
+  return { category: "Other", subcategory: null, confidence: 0.45, source: "fallback" };
 }
 
 function normalizeTransaction(transaction) {
-  const { category, source } = classifyTransaction(transaction);
+  const { category, subcategory, confidence, source } = classifyTransaction(transaction);
+  const rawMerchant = transaction.name || transaction.merchant_name || "Unknown Merchant";
+  const merchant = cleanMerchantName(transaction.merchant_name || transaction.name);
 
   return {
     id: transaction.transaction_id,
     date: transaction.date,
-    merchant: transaction.merchant_name || transaction.name,
+    rawMerchant,
+    merchant,
     amount: transaction.amount,
     direction: transaction.amount < 0 ? "income" : "expense",
     category,
+    subcategory,
+    location: extractLocation(transaction, rawMerchant),
+    confidence,
     categorySource: source,
     plaidCategory: transaction.personal_finance_category?.primary || null,
+    plaidDetailedCategory: transaction.personal_finance_category?.detailed || null,
     pending: transaction.pending,
   };
 }
@@ -347,12 +431,14 @@ async function classifyWithLLM(transactions) {
   const candidates = transactions.filter(
     (transaction) =>
       transaction.direction === "expense" &&
-      ["Other", "Payment", "Transfer"].includes(transaction.category)
+      (!String(transaction.categorySource || "").startsWith("llm:") ||
+        !transaction.subcategory ||
+        typeof transaction.confidence !== "number")
   );
 
   if (candidates.length === 0) return transactions;
 
-  const categoryById = new Map();
+  const classificationById = new Map();
   const chunkSize = 24;
 
   for (let index = 0; index < candidates.length; index += chunkSize) {
@@ -360,16 +446,20 @@ async function classifyWithLLM(transactions) {
     const response = await openai.responses.create({
       model: openaiModel,
       instructions:
-        "Classify bank transactions for a personal spending dashboard. Use only the allowed categories. Prefer practical consumer-spending categories. Do not give financial advice.",
+        "Clean and classify bank transactions for a personal spending dashboard. Convert messy raw merchant text into a short human-readable merchant name. Use only the allowed categories. Add a practical subcategory, city/location if obvious, and confidence from 0 to 1. Do not give financial advice.",
       input: JSON.stringify({
         allowed_categories: allowedCategories,
         transactions: chunk.map((transaction) => ({
           id: transaction.id,
           date: transaction.date,
+          raw_merchant: transaction.rawMerchant,
           merchant: transaction.merchant,
           amount: transaction.amount,
           plaid_category: transaction.plaidCategory,
+          plaid_detailed_category: transaction.plaidDetailedCategory,
           current_category: transaction.category,
+          current_subcategory: transaction.subcategory,
+          current_location: transaction.location,
         })),
       }),
       text: {
@@ -388,10 +478,13 @@ async function classifyWithLLM(transactions) {
                   additionalProperties: false,
                   properties: {
                     id: { type: "string" },
+                    merchant: { type: "string" },
                     category: { type: "string", enum: allowedCategories },
+                    subcategory: { type: "string" },
+                    location: { type: "string" },
                     confidence: { type: "number" },
                   },
-                  required: ["id", "category", "confidence"],
+                  required: ["id", "merchant", "category", "subcategory", "location", "confidence"],
                 },
               },
             },
@@ -405,21 +498,25 @@ async function classifyWithLLM(transactions) {
 
     for (const item of parsed.classifications || []) {
       if (allowedCategories.includes(item.category) && item.confidence >= 0.55) {
-        categoryById.set(item.id, item.category);
+        classificationById.set(item.id, item);
       }
     }
   }
 
   return transactions.map((transaction) => {
-    const category = categoryById.get(transaction.id);
+    const classification = classificationById.get(transaction.id);
 
-    if (!category) {
+    if (!classification) {
       return transaction;
     }
 
     return {
       ...transaction,
-      category,
+      merchant: cleanMerchantName(classification.merchant || transaction.merchant),
+      category: classification.category,
+      subcategory: classification.subcategory || transaction.subcategory,
+      location: classification.location || transaction.location,
+      confidence: Math.max(transaction.confidence || 0, classification.confidence),
       categorySource: `llm:${openaiModel}`,
     };
   });
@@ -455,13 +552,92 @@ function buildSummary(transactions) {
   };
 }
 
+function moneyText(value) {
+  return `$${Number(value || 0).toLocaleString("en-US", {
+    maximumFractionDigits: 0,
+  })}`;
+}
+
+function topMerchants(transactions, limit = 3) {
+  const totals = transactions
+    .filter((transaction) => transaction.direction === "expense" && !transaction.pending)
+    .reduce((acc, transaction) => {
+      acc[transaction.merchant] = (acc[transaction.merchant] || 0) + transaction.amount;
+      return acc;
+    }, {});
+
+  return Object.entries(totals)
+    .map(([name, value]) => ({ name, value: Number(value.toFixed(2)) }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, limit);
+}
+
+function buildSpendingInsight(monthTransactions, weekTransactions) {
+  const monthSummary = buildSummary(monthTransactions);
+  const weekSummary = buildSummary(weekTransactions);
+  const previousWeekSummary = buildSummary(
+    monthTransactions.filter((transaction) => {
+      const currentWeekStart = daysAgoKey(7);
+      const previousWeekStart = daysAgoKey(14);
+      return transaction.date >= previousWeekStart && transaction.date < currentWeekStart;
+    })
+  );
+  const topCategory = monthSummary.categoryBreakdown[0];
+  const weekDelta = Number(
+    (weekSummary.totalExpense - previousWeekSummary.totalExpense).toFixed(2)
+  );
+  const merchants = topMerchants(monthTransactions, 3);
+  const merchantText = merchants.length
+    ? `Top merchants: ${merchants.map((merchant) => `${merchant.name} ${moneyText(merchant.value)}`).join(", ")}.`
+    : "No top merchants yet.";
+  const comparisonText =
+    previousWeekSummary.totalExpense > 0
+      ? `Last 7 days are ${moneyText(Math.abs(weekDelta))} ${
+          weekDelta >= 0 ? "above" : "below"
+        } the previous 7 days.`
+      : "Previous-week comparison will appear after more transactions.";
+
+  return {
+    headline:
+      monthSummary.totalExpense > 0
+        ? `You spent ${moneyText(monthSummary.totalExpense)} in the last 30 days.`
+        : "Connect and sync to generate a spending summary.",
+    month:
+      topCategory
+        ? `The biggest category is ${topCategory.name} at ${moneyText(topCategory.value)}. ${merchantText}`
+        : "No spending categories yet.",
+    week: `${comparisonText} This week spending is ${moneyText(weekSummary.totalExpense)}.`,
+    topCategoryName: topCategory?.name || null,
+    topMerchants: merchants,
+  };
+}
+
+function withTransactionDefaults(transaction) {
+  const merchant = cleanMerchantName(transaction.merchant || transaction.rawMerchant || "Unknown Merchant");
+
+  return {
+    ...transaction,
+    rawMerchant: transaction.rawMerchant || transaction.merchant || merchant,
+    merchant,
+    category: transaction.category || "Other",
+    subcategory: transaction.subcategory || null,
+    location: transaction.location || null,
+    confidence: Number(transaction.confidence ?? 0.6),
+    pending: Boolean(transaction.pending),
+  };
+}
+
 function buildDashboardPayload(transactions) {
-  const monthTransactions = filterTransactionsByDays(transactions, 30);
+  const monthTransactions = filterTransactionsByDays(
+    transactions.map(withTransactionDefaults),
+    30
+  );
   const weekTransactions = filterTransactionsByDays(monthTransactions, 7);
 
   return {
     transactions: monthTransactions,
     summary: buildSummary(monthTransactions),
+    insight: buildSpendingInsight(monthTransactions, weekTransactions),
     week: {
       transactions: weekTransactions,
       summary: buildSummary(weekTransactions),
@@ -565,9 +741,10 @@ app.post("/api/plaid/sync-transactions", requirePlaidConfig, async (req, res) =>
     }
 
     demoItem.cursor = cursor;
-    demoItem.transactions = filterTransactionsByDays(Array.from(byId.values()), 30).sort((a, b) =>
-      b.date.localeCompare(a.date)
+    demoItem.transactions = await classifyWithLLM(
+      filterTransactionsByDays(Array.from(byId.values()).map(withTransactionDefaults), 30)
     );
+    demoItem.transactions = demoItem.transactions.sort((a, b) => b.date.localeCompare(a.date));
     await saveDemoItem();
 
     res.json({
