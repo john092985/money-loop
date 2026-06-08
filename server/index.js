@@ -571,6 +571,7 @@ app.post("/api/plaid/sync-transactions", requirePlaidConfig, async (req, res) =>
     await saveDemoItem();
 
     res.json({
+      connected: Boolean(demoItem.accessToken),
       item_id: demoItem.itemId,
       added: added.length,
       modified: modified.length,
