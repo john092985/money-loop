@@ -1060,6 +1060,327 @@ function savingsOpportunities(transactions, limit = 4) {
     }));
 }
 
+const spendingToolSchemas = [
+  {
+    type: "function",
+    name: "get_transactions",
+    description:
+      "Read cleaned Money Loop transactions for a date range, with optional category, merchant, or direction filters.",
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "Inclusive YYYY-MM-DD start date." },
+        end_date: { type: "string", description: "Inclusive YYYY-MM-DD end date." },
+        category: { type: "string", description: "Optional category, such as Dining or Transport." },
+        merchant: { type: "string", description: "Optional merchant search text." },
+        direction: { type: "string", enum: ["expense", "income"] },
+        include_pending: { type: "boolean" },
+        limit: { type: "integer", minimum: 1, maximum: 250 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "summarize_spending",
+    description:
+      "Summarize spending and income by category, subcategory, merchant, or day for a date range.",
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "Inclusive YYYY-MM-DD start date." },
+        end_date: { type: "string", description: "Inclusive YYYY-MM-DD end date." },
+        group_by: { type: "string", enum: ["category", "subcategory", "merchant", "day"] },
+        include_pending: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "get_takeout_spending",
+    description: "Find likely takeout or food delivery spending for a date range.",
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "Inclusive YYYY-MM-DD start date." },
+        end_date: { type: "string", description: "Inclusive YYYY-MM-DD end date." },
+        limit: { type: "integer", minimum: 1, maximum: 250 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "find_unusual_spending",
+    description:
+      "Return unusually large posted expenses compared with the recent transaction distribution.",
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        days: { type: "integer", minimum: 1, maximum: 120 },
+        limit: { type: "integer", minimum: 1, maximum: 25 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "get_savings_opportunities",
+    description:
+      "Rank discretionary categories and merchants that may be useful places to review spending.",
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "Inclusive YYYY-MM-DD start date." },
+        end_date: { type: "string", description: "Inclusive YYYY-MM-DD end date." },
+        limit: { type: "integer", minimum: 1, maximum: 20 },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+function transactionToToolRow(transaction) {
+  return {
+    id: transaction.id,
+    date: transaction.date,
+    merchant: transaction.merchant,
+    raw_merchant: transaction.rawMerchant,
+    amount: transaction.amount,
+    direction: transaction.direction,
+    category: transaction.category,
+    subcategory: transaction.subcategory,
+    location: transaction.location,
+    confidence: transaction.confidence,
+    category_source: transaction.categorySource,
+    plaid_category: transaction.plaidCategory,
+    plaid_detailed_category: transaction.plaidDetailedCategory,
+    pending: transaction.pending,
+  };
+}
+
+function dateArgument(value, fallback) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? value : fallback;
+}
+
+function numberArgument(value, fallback, max) {
+  const number = Number(value || fallback);
+  return Math.min(Math.max(Number.isFinite(number) ? number : fallback, 1), max);
+}
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function toolRowsInRange({ startDate, endDate, includePending = false }) {
+  return demoItem.transactions
+    .map(withTransactionDefaults)
+    .filter((transaction) => transaction.date >= startDate && transaction.date <= endDate)
+    .filter((transaction) => includePending || !transaction.pending)
+    .map(transactionToToolRow);
+}
+
+function summarizeToolRows(rows, groupBy = "category") {
+  const groups = new Map();
+  let totalExpense = 0;
+  let totalIncome = 0;
+
+  for (const row of rows) {
+    const amount = Number(row.amount || 0);
+
+    if (row.direction === "expense") {
+      totalExpense += amount;
+    } else if (row.direction === "income") {
+      totalIncome += Math.abs(amount);
+    }
+
+    const key =
+      groupBy === "day"
+        ? row.date
+        : row[groupBy] || (groupBy === "subcategory" ? "Uncategorized" : "Other");
+
+    if (!groups.has(key)) {
+      groups.set(key, { name: key, totalExpense: 0, totalIncome: 0, count: 0 });
+    }
+
+    const group = groups.get(key);
+    group.count += 1;
+
+    if (row.direction === "expense") {
+      group.totalExpense += amount;
+    } else if (row.direction === "income") {
+      group.totalIncome += Math.abs(amount);
+    }
+  }
+
+  return {
+    totalExpense: Number(totalExpense.toFixed(2)),
+    totalIncome: Number(totalIncome.toFixed(2)),
+    net: Number((totalIncome - totalExpense).toFixed(2)),
+    count: rows.length,
+    groups: Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        totalExpense: Number(group.totalExpense.toFixed(2)),
+        totalIncome: Number(group.totalIncome.toFixed(2)),
+      }))
+      .sort((a, b) => b.totalExpense - a.totalExpense),
+  };
+}
+
+function isTakeoutToolRow(row) {
+  const text = [
+    row.merchant,
+    row.raw_merchant,
+    row.category,
+    row.subcategory,
+    row.plaid_detailed_category,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    row.direction === "expense" &&
+    row.category === "Dining" &&
+    (text.includes("delivery") ||
+      text.includes("takeout") ||
+      text.includes("doordash") ||
+      text.includes("uber eats") ||
+      text.includes("ubereats") ||
+      text.includes("grubhub") ||
+      text.includes("postmates"))
+  );
+}
+
+async function runSpendingTool(name, args = {}) {
+  const startDate = dateArgument(args.start_date, startOfMonth().toISOString().slice(0, 10));
+  const endDate = dateArgument(args.end_date, dateKey());
+
+  if (name === "get_transactions") {
+    const limit = numberArgument(args.limit, 50, 250);
+    const rows = toolRowsInRange({
+      startDate,
+      endDate,
+      includePending: Boolean(args.include_pending),
+    })
+      .filter((row) => !args.category || row.category?.toLowerCase() === String(args.category).toLowerCase())
+      .filter((row) => !args.direction || row.direction === args.direction)
+      .filter((row) => {
+        if (!args.merchant) return true;
+        const merchant = String(args.merchant).toLowerCase();
+        return (
+          row.merchant?.toLowerCase().includes(merchant) ||
+          row.raw_merchant?.toLowerCase().includes(merchant)
+        );
+      })
+      .sort((a, b) => b.date.localeCompare(a.date) || b.amount - a.amount)
+      .slice(0, limit);
+
+    return {
+      count: rows.length,
+      transactions: rows,
+    };
+  }
+
+  if (name === "summarize_spending") {
+    const groupBy = ["category", "subcategory", "merchant", "day"].includes(args.group_by)
+      ? args.group_by
+      : "category";
+    const rows = toolRowsInRange({
+      startDate,
+      endDate,
+      includePending: Boolean(args.include_pending),
+    });
+
+    return {
+      period: { start_date: startDate, end_date: endDate },
+      group_by: groupBy,
+      ...summarizeToolRows(rows, groupBy),
+    };
+  }
+
+  if (name === "get_takeout_spending") {
+    const limit = numberArgument(args.limit, 250, 250);
+    const rows = toolRowsInRange({ startDate, endDate })
+      .filter(isTakeoutToolRow)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.amount - a.amount)
+      .slice(0, limit);
+
+    return {
+      period: { start_date: startDate, end_date: endDate },
+      total: Number(rows.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2)),
+      count: rows.length,
+      transactions: rows,
+    };
+  }
+
+  if (name === "find_unusual_spending") {
+    const days = numberArgument(args.days, 30, 120);
+    const limit = numberArgument(args.limit, 8, 25);
+    const rows = toolRowsInRange({
+      startDate: daysAgoKey(days),
+      endDate: dateKey(),
+    }).filter((row) => row.direction === "expense");
+    const amounts = rows.map((row) => Number(row.amount || 0));
+    const average = amounts.reduce((sum, amount) => sum + amount, 0) / (amounts.length || 1);
+    const variance =
+      amounts.reduce((sum, amount) => sum + (amount - average) ** 2, 0) /
+      (amounts.length || 1);
+    const standardDeviation = Math.sqrt(variance);
+    const minimumThreshold = Math.max(100, average + standardDeviation);
+    const unusual = rows
+      .filter((row) => Number(row.amount || 0) >= minimumThreshold)
+      .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
+      .slice(0, limit);
+
+    return {
+      period_days: days,
+      baseline: {
+        average: Number(average.toFixed(2)),
+        standard_deviation: Number(standardDeviation.toFixed(2)),
+        minimum_threshold: Number(minimumThreshold.toFixed(2)),
+      },
+      count: unusual.length,
+      transactions: unusual,
+    };
+  }
+
+  if (name === "get_savings_opportunities") {
+    const limit = numberArgument(args.limit, 6, 20);
+    const discretionary = new Set([
+      "Dining",
+      "Shopping",
+      "Entertainment",
+      "Subscription",
+      "Travel",
+      "Transport",
+    ]);
+    const rows = toolRowsInRange({ startDate, endDate }).filter(
+      (row) => row.direction === "expense" && discretionary.has(row.category)
+    );
+
+    return {
+      period: { start_date: startDate, end_date: endDate },
+      categories: summarizeToolRows(rows, "category").groups.slice(0, limit),
+      merchants: summarizeToolRows(rows, "merchant").groups.slice(0, limit),
+      note: "These are spending review targets, not financial advice.",
+    };
+  }
+
+  throw new Error(`Unknown spending tool: ${name}`);
+}
+
 function buildQueryContext() {
   const historyTransactions = filterTransactionsByDays(
     demoItem.transactions.map(withTransactionDefaults),
@@ -1141,25 +1462,103 @@ async function answerSpendingQuestion(question) {
     };
   }
 
-  const response = await openai.responses.create({
+  const instructions = [
+    "You are a concise personal spending analyst for Money Loop. Answer in Chinese.",
+    "Use the provided spending tools for transaction facts instead of guessing.",
+    `Today is ${dateKey()}. Interpret relative dates from this date.`,
+    `最近 7 天 / last 7 days means ${daysAgoKey(7)} through ${dateKey()}, inclusive.`,
+    `最近 30 天 / last 30 days means ${daysAgoKey(30)} through ${dateKey()}, inclusive.`,
+    "For questions about recent spending, first call summarize_spending with the right date range.",
+    "For '花了什么' style questions, include top categories and notable merchants if available.",
+    "For abnormal spending, call find_unusual_spending.",
+    "For takeout/外卖, call get_takeout_spending.",
+    "For saving opportunities, call get_savings_opportunities.",
+    "Do not give investment, credit, tax, or legal advice.",
+  ].join(" ");
+
+  const firstResponse = await openai.responses.create({
     model: openaiModel,
-    instructions:
-      "You are a concise personal spending analyst. Answer in Chinese. Use only the provided transaction context. If the data is insufficient, say what is missing. Do not give investment, credit, tax, or legal advice.",
-    input: JSON.stringify({
-      question,
-      context,
-    }),
+    instructions,
+    tools: spendingToolSchemas,
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: question,
+          },
+        ],
+      },
+    ],
+  });
+  const toolCalls = firstResponse.output.filter((item) => item.type === "function_call");
+
+  if (toolCalls.length === 0) {
+    return {
+      answer: firstResponse.output_text?.trim() || fallbackQueryAnswer(question, context),
+      context: {
+        reports: context.reports,
+        anomalies: context.anomalies,
+        savings: context.savings,
+        takeoutThisMonth: context.takeoutThisMonth,
+      },
+      source: `llm:${openaiModel}`,
+      toolCalls: [],
+    };
+  }
+
+  const toolOutputs = [];
+
+  for (const toolCall of toolCalls.slice(0, 4)) {
+    let args = {};
+
+    try {
+      args = JSON.parse(toolCall.arguments || "{}");
+    } catch {
+      args = {};
+    }
+
+    const result = await runSpendingTool(toolCall.name, args);
+    toolOutputs.push({
+      type: "function_call_output",
+      call_id: toolCall.call_id,
+      output: JSON.stringify(result),
+    });
+  }
+
+  const finalResponse = await openai.responses.create({
+    model: openaiModel,
+    instructions,
+    tools: spendingToolSchemas,
+    input: [
+      ...firstResponse.output,
+      ...toolOutputs,
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "请基于工具返回的数据直接回答我的问题，简洁但要有具体金额和主要类别/商户。",
+          },
+        ],
+      },
+    ],
   });
 
   return {
-    answer: response.output_text?.trim() || fallbackQueryAnswer(question, context),
+    answer: finalResponse.output_text?.trim() || fallbackQueryAnswer(question, context),
     context: {
       reports: context.reports,
       anomalies: context.anomalies,
       savings: context.savings,
       takeoutThisMonth: context.takeoutThisMonth,
     },
-    source: `llm:${openaiModel}`,
+    source: `llm-tools:${openaiModel}`,
+    toolCalls: toolCalls.map((toolCall) => ({
+      name: toolCall.name,
+      arguments: safeJsonParse(toolCall.arguments),
+    })),
   };
 }
 

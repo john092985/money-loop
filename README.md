@@ -234,3 +234,5 @@ Available tools:
 - `get_takeout_spending`: find likely takeout and delivery spending.
 - `find_unusual_spending`: surface unusually large posted expenses.
 - `get_savings_opportunities`: rank discretionary categories and merchants to review.
+
+The in-app natural language endpoint also uses these same tool names through OpenAI function calling. For example, asking `最近7天花费什么了` makes `/api/query` call `summarize_spending` for the last 7-day inclusive range, then asks the model to answer from the tool result.
