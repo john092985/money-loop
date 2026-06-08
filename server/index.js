@@ -35,7 +35,7 @@ const plaidClient = new PlaidApi(configuration);
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
-const openaiModel = process.env.OPENAI_MODEL || "gpt-4.1-nano";
+const openaiModel = process.env.OPENAI_MODEL || "gpt-5-mini";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(__dirname, "../.data");
 const statePath = path.join(dataDir, "state.json");

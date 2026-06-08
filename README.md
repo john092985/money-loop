@@ -28,7 +28,7 @@ Optional LLM categorization:
 
 ```bash
 OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4.1-nano
+OPENAI_MODEL=gpt-5-mini
 ```
 
 The app first uses local rules and Plaid categories. It only sends low-confidence categories like `Other`, `Payment`, and `Transfer` to the small LLM. The model receives transaction date, merchant, amount, and Plaid's high-level category, not Plaid tokens or account numbers.
@@ -172,7 +172,7 @@ PLAID_ENV=production
 PLAID_PRODUCTS=transactions
 PLAID_COUNTRY_CODES=US
 OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4.1-nano
+OPENAI_MODEL=gpt-5-mini
 APP_STORAGE_SECRET=生成一个长随机字符串
 APP_USER_ID=demo-user
 DATABASE_URL=Supabase Postgres connection string
