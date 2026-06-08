@@ -43,6 +43,14 @@ DATABASE_URL=
 
 If `DATABASE_URL` is empty, the backend creates a local key in `.data/local-storage-key` and stores encrypted state in `.data/state.json`. If `DATABASE_URL` is set, the backend stores encrypted state in Postgres. On Render, always set a stable `APP_STORAGE_SECRET`; otherwise encrypted Plaid tokens may become unreadable after a redeploy.
 
+Optional MCP database tools:
+
+```bash
+npm run mcp:spending
+```
+
+This starts a read-only MCP server over stdio. It needs `DATABASE_URL` and uses `APP_USER_ID` to select one user's rows from Supabase.
+
 4. Run the app:
 
 ```bash
@@ -123,13 +131,25 @@ Use this setup for a fixed HTTPS backend URL.
 
 Create a free Supabase project, then copy its Postgres connection string. Use the pooled/session connection string if Supabase recommends it for serverless-style hosting.
 
-The backend auto-creates this table on first write:
+The backend auto-creates these tables on first write:
 
 ```sql
 CREATE TABLE IF NOT EXISTS app_state (
   key TEXT PRIMARY KEY,
   value JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  date DATE NOT NULL,
+  merchant TEXT NOT NULL,
+  amount NUMERIC(14, 2) NOT NULL,
+  direction TEXT NOT NULL,
+  category TEXT NOT NULL,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (user_id, id)
 );
 ```
 
@@ -173,6 +193,8 @@ It should return:
 }
 ```
 
+Tap `Sync` once after a deploy to write the latest normalized transactions into Supabase. The app keeps the recent 120 days in the database and shows the most recent 30 days in the UI.
+
 ### 3. Point iPhone app at Render
 
 In the Money Loop app settings, set:
@@ -182,3 +204,33 @@ https://your-render-service.onrender.com
 ```
 
 For a production app, hide the settings screen and hardcode the Render URL in `ContentView.swift`.
+
+## MCP Spending Server
+
+The MCP server lets an LLM query your transaction database instead of receiving every transaction in its prompt.
+
+Example MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "money-loop-spending": {
+      "command": "npm",
+      "args": ["run", "mcp:spending"],
+      "cwd": "/Users/lvjingxuan/Desktop/¥¥¥¥",
+      "env": {
+        "DATABASE_URL": "postgresql://...",
+        "APP_USER_ID": "demo-user"
+      }
+    }
+  }
+}
+```
+
+Available tools:
+
+- `get_transactions`: read cleaned transactions by date, category, merchant, or direction.
+- `summarize_spending`: aggregate spending by category, subcategory, merchant, or day.
+- `get_takeout_spending`: find likely takeout and delivery spending.
+- `find_unusual_spending`: surface unusually large posted expenses.
+- `get_savings_opportunities`: rank discretionary categories and merchants to review.

@@ -193,12 +193,23 @@ async function decryptText(payload) {
 async function loadDemoItem() {
   try {
     const rawState = await readStoredState();
+    const databaseTransactions = dbPool ? await readTransactionsFromDatabase() : [];
+    const storedTransactions =
+      dbPool && databaseTransactions.length > 0
+        ? databaseTransactions
+        : rawState.transactions || [];
+
+    if (dbPool && databaseTransactions.length === 0 && rawState.transactions?.length) {
+      await replaceTransactionsInDatabase(
+        filterTransactionsByDays(rawState.transactions, historyDays)
+      );
+    }
 
     return {
       accessToken: await decryptText(rawState.accessToken),
       itemId: rawState.itemId || null,
       cursor: rawState.cursor || null,
-      transactions: filterTransactionsByDays(rawState.transactions || [], historyDays).sort((a, b) =>
+      transactions: filterTransactionsByDays(storedTransactions, historyDays).sort((a, b) =>
         b.date.localeCompare(a.date)
       ),
     };
@@ -208,13 +219,24 @@ async function loadDemoItem() {
 }
 
 async function saveDemoItem() {
-  await writeStoredState({
+  const state = {
     accessToken: await encryptText(demoItem.accessToken),
     itemId: demoItem.itemId,
     cursor: demoItem.cursor,
-    transactions: filterTransactionsByDays(demoItem.transactions || [], historyDays),
     savedAt: new Date().toISOString(),
-  });
+  };
+
+  if (!dbPool) {
+    state.transactions = filterTransactionsByDays(demoItem.transactions || [], historyDays);
+  }
+
+  await writeStoredState(state);
+
+  if (dbPool) {
+    await replaceTransactionsInDatabase(
+      filterTransactionsByDays(demoItem.transactions || [], historyDays)
+    );
+  }
 }
 
 async function ensureDatabase() {
@@ -227,6 +249,37 @@ async function ensureDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS transactions (
+      id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      date DATE NOT NULL,
+      merchant TEXT NOT NULL,
+      raw_merchant TEXT,
+      amount NUMERIC(14, 2) NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('expense', 'income')),
+      category TEXT NOT NULL,
+      subcategory TEXT,
+      location TEXT,
+      confidence NUMERIC(5, 4),
+      category_source TEXT,
+      plaid_category TEXT,
+      plaid_detailed_category TEXT,
+      pending BOOLEAN NOT NULL DEFAULT FALSE,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, id)
+    )
+  `);
+
+  await dbPool.query(
+    "CREATE INDEX IF NOT EXISTS transactions_user_date_idx ON transactions (user_id, date DESC)"
+  );
+  await dbPool.query(
+    "CREATE INDEX IF NOT EXISTS transactions_user_category_idx ON transactions (user_id, category)"
+  );
 }
 
 async function readStoredState() {
@@ -263,6 +316,110 @@ async function writeStoredState(state) {
     `,
     [stateStorageKey, JSON.stringify(state)]
   );
+}
+
+function rowToTransaction(row) {
+  return {
+    ...(row.data || {}),
+    id: row.id,
+    date: dateKey(new Date(row.date)),
+    merchant: row.merchant,
+    rawMerchant: row.raw_merchant,
+    amount: Number(row.amount),
+    direction: row.direction,
+    category: row.category,
+    subcategory: row.subcategory,
+    location: row.location,
+    confidence: row.confidence === null ? null : Number(row.confidence),
+    categorySource: row.category_source,
+    plaidCategory: row.plaid_category,
+    plaidDetailedCategory: row.plaid_detailed_category,
+    pending: row.pending,
+  };
+}
+
+async function readTransactionsFromDatabase() {
+  if (!dbPool) return [];
+
+  await ensureDatabase();
+  const result = await dbPool.query(
+    `
+      SELECT *
+      FROM transactions
+      WHERE user_id = $1
+      ORDER BY date DESC, updated_at DESC
+    `,
+    [stateStorageKey]
+  );
+
+  return result.rows.map(rowToTransaction);
+}
+
+async function replaceTransactionsInDatabase(transactions) {
+  if (!dbPool) return;
+
+  await ensureDatabase();
+  const client = await dbPool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM transactions WHERE user_id = $1", [stateStorageKey]);
+
+    for (const transaction of transactions.map(withTransactionDefaults)) {
+      await client.query(
+        `
+          INSERT INTO transactions (
+            id,
+            user_id,
+            date,
+            merchant,
+            raw_merchant,
+            amount,
+            direction,
+            category,
+            subcategory,
+            location,
+            confidence,
+            category_source,
+            plaid_category,
+            plaid_detailed_category,
+            pending,
+            data,
+            updated_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            $9, $10, $11, $12, $13, $14, $15, $16::jsonb, NOW()
+          )
+        `,
+        [
+          transaction.id,
+          stateStorageKey,
+          transaction.date,
+          transaction.merchant,
+          transaction.rawMerchant || null,
+          transaction.amount,
+          transaction.direction,
+          transaction.category,
+          transaction.subcategory || null,
+          transaction.location || null,
+          transaction.confidence ?? null,
+          transaction.categorySource || null,
+          transaction.plaidCategory || null,
+          transaction.plaidDetailedCategory || null,
+          Boolean(transaction.pending),
+          JSON.stringify(transaction),
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function dateKey(date = new Date()) {
