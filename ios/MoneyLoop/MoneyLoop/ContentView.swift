@@ -10,6 +10,11 @@ private enum AppPalette {
     static let page = Color(red: 0.94, green: 0.96, blue: 0.95)
 }
 
+private enum InputField: Hashable {
+    case question
+    case backendURL
+}
+
 struct ContentView: View {
     @AppStorage("serverURL") private var serverURL = AppConfig.defaultBackendURL
     @StateObject private var store = MoneyLoopStore()
@@ -18,6 +23,7 @@ struct ContentView: View {
     @State private var questionText = ""
     @State private var queryAnswer = "Ask something like: 我这个月外卖花了多少？"
     @State private var isAsking = false
+    @FocusState private var focusedField: InputField?
 
     var body: some View {
         TabView {
@@ -120,10 +126,32 @@ struct ContentView: View {
                     suggestedQuestions
                 }
                 .padding(16)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    focusedField = nil
+                }
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(AppPalette.page)
             .navigationTitle("Ask")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+
+                    if focusedField == .question,
+                       !questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button("Ask") {
+                            Task { await submitQuestion() }
+                        }
+                        .disabled(isAsking)
+                    }
+
+                    Button("Done") {
+                        focusedField = nil
+                    }
+                }
+            }
         }
     }
 
@@ -155,6 +183,11 @@ struct ContentView: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .backendURL)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            focusedField = nil
+                        }
 
                     Button("Use Cloud Backend") {
                         draftServerURL = AppConfig.defaultBackendURL
@@ -437,6 +470,11 @@ struct ContentView: View {
             TextField("我这个月外卖花了多少？", text: $questionText, axis: .vertical)
                 .lineLimit(2...4)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .question)
+                .submitLabel(.send)
+                .onSubmit {
+                    Task { await submitQuestion() }
+                }
 
             Button {
                 Task { await submitQuestion() }
@@ -496,6 +534,7 @@ struct ContentView: View {
         let question = questionText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
 
+        focusedField = nil
         isAsking = true
         queryAnswer = "Thinking..."
 
