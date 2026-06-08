@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Connect Bank</title>
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: #eef2f3;
+        color: #17201c;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      body {
+        align-items: center;
+        display: flex;
+        justify-content: center;
+        margin: 0;
+        min-height: 100vh;
+        padding: 20px;
+      }
+
+      main {
+        background: white;
+        border: 1px solid #d9e2de;
+        border-radius: 12px;
+        box-shadow: 0 18px 40px rgba(23, 32, 28, 0.1);
+        max-width: 390px;
+        padding: 22px;
+        width: 100%;
+      }
+
+      h1 {
+        font-size: 26px;
+        letter-spacing: 0;
+        margin: 0 0 8px;
+      }
+
+      p {
+        color: #5d6b64;
+        font-size: 15px;
+        line-height: 1.45;
+        margin: 0 0 18px;
+      }
+
+      button {
+        align-items: center;
+        background: #102821;
+        border: 0;
+        border-radius: 8px;
+        color: white;
+        cursor: pointer;
+        display: inline-flex;
+        font: inherit;
+        font-weight: 850;
+        height: 50px;
+        justify-content: center;
+        width: 100%;
+      }
+
+      button:disabled {
+        opacity: 0.55;
+      }
+
+      small {
+        color: #6d7a73;
+        display: block;
+        font-weight: 700;
+        margin-top: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Connect Bank</h1>
+      <p id="status">Preparing secure Plaid Link...</p>
+      <button id="connect" disabled>Open Plaid</button>
+      <small>After authorization, you will return to Money Loop.</small>
+    </main>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const connectButton = document.getElementById("connect");
+      const params = new URLSearchParams(window.location.search);
+      const returnTo = params.get("return_to") || "moneyloop://plaid-success";
+
+      function returnToApp(publicToken) {
+        const separator = returnTo.includes("?") ? "&" : "?";
+        window.location.href = `${returnTo}${separator}public_token=${encodeURIComponent(publicToken)}`;
+      }
+
+      async function setupPlaid() {
+        try {
+          const response = await fetch("/api/plaid/create-link-token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(typeof data.error === "string" ? data.error : JSON.stringify(data.error));
+          }
+
+          const handler = Plaid.create({
+            token: data.link_token,
+            onSuccess: (publicToken) => {
+              statusEl.textContent = "Bank connected. Returning to Money Loop...";
+              returnToApp(publicToken);
+            },
+            onExit: (err) => {
+              statusEl.textContent = err
+                ? `Plaid Link exited: ${err.display_message || err.error_message}`
+                : "Plaid Link was closed.";
+            },
+          });
+
+          connectButton.disabled = false;
+          connectButton.addEventListener("click", () => handler.open());
+          statusEl.textContent = "Ready to connect your bank.";
+        } catch (error) {
+          statusEl.textContent = error.message;
+        }
+      }
+
+      setupPlaid();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: money-loop-api
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: PLAID_CLIENT_ID
+        sync: false
+      - key: PLAID_SECRET
+        sync: false
+      - key: PLAID_ENV
+        value: production
+      - key: PLAID_PRODUCTS
+        value: transactions
+      - key: PLAID_COUNTRY_CODES
+        value: US
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-nano
+      - key: APP_STORAGE_SECRET
+        sync: false
+      - key: APP_USER_ID
+        value: demo-user
+      - key: DATABASE_URL
+        sync: false
