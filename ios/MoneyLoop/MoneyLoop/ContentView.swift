@@ -1,8 +1,13 @@
 import SafariServices
 import SwiftUI
 
+private enum AppConfig {
+    static let defaultBackendURL = "https://money-loop.onrender.com"
+    static let legacyLocalBackendURL = "http://10.0.28.212:5173"
+}
+
 struct ContentView: View {
-    @AppStorage("serverURL") private var serverURL = "http://10.0.28.212:5173"
+    @AppStorage("serverURL") private var serverURL = AppConfig.defaultBackendURL
     @StateObject private var store = MoneyLoopStore()
     @State private var draftServerURL = ""
     @State private var isShowingSettings = false
@@ -44,6 +49,7 @@ struct ContentView: View {
                 }
             }
             .task {
+                migrateLegacyBackendURLIfNeeded()
                 await store.load(baseURL: serverURL)
             }
             .onOpenURL { url in
@@ -209,14 +215,18 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("Backend") {
-                    TextField("http://10.0.28.212:5173", text: $draftServerURL)
+                    TextField(AppConfig.defaultBackendURL, text: $draftServerURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+
+                    Button("Use Cloud Backend") {
+                        draftServerURL = AppConfig.defaultBackendURL
+                    }
                 }
 
                 Section {
-                    Text("Use your Mac LAN IP with port 5173 on a physical iPhone. localhost only works in the iOS Simulator.")
+                    Text("The cloud backend stores your encrypted Plaid connection in Supabase and keeps working when your Mac is offline.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -230,7 +240,7 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        serverURL = draftServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                        serverURL = normalizedBackendURL(draftServerURL)
                         isShowingSettings = false
                         Task { await store.load(baseURL: serverURL) }
                     }
@@ -245,8 +255,13 @@ struct ContentView: View {
     }
 
     private func openPlaidLink() {
+        let baseURL = normalizedBackendURL(serverURL)
+        if baseURL != serverURL {
+            serverURL = baseURL
+        }
+
         guard let encodedReturnTo = "moneyloop://plaid-success".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "\(serverURL)/mobile-link.html?return_to=\(encodedReturnTo)") else {
+              let url = URL(string: "\(baseURL)/mobile-link.html?return_to=\(encodedReturnTo)") else {
             store.status = "Invalid server URL."
             return
         }
@@ -271,6 +286,21 @@ struct ContentView: View {
             await store.exchange(publicToken: publicToken, baseURL: serverURL)
             await store.sync(baseURL: serverURL)
         }
+    }
+
+    private func migrateLegacyBackendURLIfNeeded() {
+        if normalizedBackendURL(serverURL) == AppConfig.legacyLocalBackendURL {
+            serverURL = AppConfig.defaultBackendURL
+        }
+    }
+
+    private func normalizedBackendURL(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 1 else {
+            return AppConfig.defaultBackendURL
+        }
+
+        return trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
     }
 }
 
@@ -515,6 +545,11 @@ final class MoneyLoopStore: ObservableObject {
 struct MoneyLoopAPI {
     let baseURL: String
 
+    private var normalizedBaseURL: String {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+    }
+
     func dashboard() async throws -> Dashboard {
         try await request(path: "/api/dashboard")
     }
@@ -537,7 +572,7 @@ struct MoneyLoopAPI {
         method: String = "GET",
         body: Body? = Optional<String>.none
     ) async throws -> Response {
-        guard let url = URL(string: baseURL + path) else {
+        guard let url = URL(string: normalizedBaseURL + path) else {
             throw MoneyLoopError.invalidURL
         }
 
